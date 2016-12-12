@@ -91,7 +91,7 @@ impl NamedPipe {
         // "Acquire the connecting lock" or otherwise just make sure we're the
         // only operation that's using the `connect` overlapped instance.
         if self.inner.connecting.swap(true, SeqCst) {
-            return Err(mio::would_block())
+            return Err(io::Error::new(io::ErrorKind::Other, "already connecting"))
         }
 
         // Now that we've flagged ourselves in the connecting state, issue the
