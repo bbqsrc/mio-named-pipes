@@ -11,7 +11,7 @@ install:
   - pip install travis-cargo --user
 
   - curl -sSf -o rustup-init.exe https://win.rustup.rs/
-  - rustup-init.exe -y --default-host x86_64-pc-windows-msvc
+  - rustup-init.exe -y --default-host %TARGET%
   - set PATH=%PATH%;C:\Users\appveyor\.cargo\bin;C:\MinGW\bin
 
   - rustc -vV
@@ -20,7 +20,7 @@ install:
 build: false
 
 test_script:
-  - cargo test --target %TARGET%
+  - cargo test
   - cargo doc --no-deps
 
 after_test:
