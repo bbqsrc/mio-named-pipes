@@ -1,3 +1,5 @@
+#![cfg(windows)]
+
 extern crate kernel32;
 extern crate lazycell;
 #[macro_use]
