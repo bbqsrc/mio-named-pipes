@@ -1,8 +1,6 @@
 environment:
   matrix:
   - TARGET: x86_64-pc-windows-msvc
-  # - TARGET: i686-pc-windows-msvc
-  # - TARGET: i686-pc-windows-gnu
   GH_TOKEN:
     secure: nHB4fVo+y/Aak+L0nYfrT8Rcs8OfUNm0F2xcIVFVYJ9ehf0CzvCmSMUvWguM0kKp
 
