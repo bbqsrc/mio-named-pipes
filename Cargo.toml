@@ -1,0 +1,11 @@
+[package]
+name = "mio-named-pipes"
+version = "0.1.0"
+authors = ["Alex Crichton <alex@alexcrichton.com>"]
+
+[dependencies]
+mio = { path = "../mio" }
+miow = "0.1"
+lazycell = "0.5"
+kernel32-sys = "0.2"
+log = "0.3"
