@@ -246,6 +246,7 @@ impl Evented for NamedPipe {
             Err(_) => return Ok(()),
         }
         assert!(self.inner.readiness.fill(s).is_ok());
+        Inner::schedule_read(&self.inner, &mut self.inner.io.lock().unwrap());
         Ok(())
     }
 
