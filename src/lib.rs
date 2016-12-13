@@ -6,6 +6,7 @@ extern crate lazycell;
 extern crate log;
 extern crate mio;
 extern crate miow;
+extern crate winapi;
 
 use std::ffi::OsStr;
 use std::fmt;
@@ -19,10 +20,11 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::SeqCst;
 
 use lazycell::AtomicLazyCell;
-use mio::{Registration, Poll, Token, PollOpt, Ready, Evented, SetReadiness};
 use mio::windows;
+use mio::{Registration, Poll, Token, PollOpt, Ready, Evented, SetReadiness};
 use miow::iocp::CompletionStatus;
 use miow::pipe;
+use winapi::ERROR_PIPE_LISTENING;
 
 mod from_raw_arc;
 use from_raw_arc::FromRawArc;
@@ -105,17 +107,24 @@ impl NamedPipe {
         };
 
         match res {
-            // If the overlapped operation was successful then we forget a copy
-            // of the arc we hold internally. This ensures that when the
-            // completion status comes in for the I/O operation finishing it'll
-            // have a reference associated with it and our data will still be
-            // valid. The `connect_done` function will "reify" this forgotten
-            // pointer to drop the refcount on the other side.
-            //
-            // TODO: are we sure an IOCP notification comes in regardless of
-            // `e`?
-            Ok(e) => {
-                trace!("connect ok: {}", e);
+            // The connection operation finished immediately, so let's schedule
+            // reads/writes and such.
+            Ok(true) => {
+                trace!("connect done immediately");
+                self.inner.connecting.store(false, SeqCst);
+                Inner::post_register(&self.inner);
+                Ok(())
+            }
+
+            // If the overlapped operation was successful and didn't finish
+            // immediately then we forget a copy of the arc we hold
+            // internally. This ensures that when the completion status comes
+            // in for the I/O operation finishing it'll have a reference
+            // associated with it and our data will still be valid. The
+            // `connect_done` function will "reify" this forgotten pointer to
+            // drop the refcount on the other side.
+            Ok(false) => {
+                trace!("connect in progress");
                 mem::forget(self.inner.clone());
                 Ok(())
             }
@@ -130,7 +139,11 @@ impl NamedPipe {
     }
 
     pub fn disconnect(&self) -> io::Result<()> {
-        self.inner.handle.disconnect()
+        try!(self.inner.handle.disconnect());
+        let readiness = self.inner.readiness.borrow().unwrap();
+        readiness.set_readiness(Ready::none())
+                 .expect("event loop seems gone");
+        Ok(())
     }
 }
 
@@ -246,7 +259,7 @@ impl Evented for NamedPipe {
             Err(_) => return Ok(()),
         }
         assert!(self.inner.readiness.fill(s).is_ok());
-        Inner::schedule_read(&self.inner, &mut self.inner.io.lock().unwrap());
+        Inner::post_register(&self.inner);
         Ok(())
     }
 
@@ -266,9 +279,15 @@ impl Evented for NamedPipe {
         // we're racing with `register` above, so just return a bland error if
         // the borrow fails.
         match self.ready_registration.borrow() {
-            Some(r) => r.update(poll, token, interest, opts),
-            None => Err(io::Error::new(io::ErrorKind::Other, "not registered")),
+            Some(r) => try!(r.update(poll, token, interest, opts)),
+            None => {
+                return Err(io::Error::new(io::ErrorKind::Other, "not registered"))
+            }
         }
+
+        Inner::post_register(&self.inner);
+
+        Ok(())
     }
 
     fn deregister(&self, poll: &Poll) -> io::Result<()> {
@@ -338,11 +357,18 @@ impl Drop for NamedPipe {
 }
 
 impl Inner {
-    fn schedule_read(me: &FromRawArc<Inner>, io: &mut Io) {
+    /// Schedules a read to happen in the background, executing an overlapped
+    /// operation.
+    ///
+    /// This function returns `true` if a normal error happens or if the read
+    /// is scheduled in the background. If the pipe is no longer connected
+    /// (ERROR_PIPE_LISTENING) then `false` is returned and no read is
+    /// scheduled.
+    fn schedule_read(me: &FromRawArc<Inner>, io: &mut Io) -> bool {
         // Check to see if a read is already scheduled/completed
         match io.read {
             State::None => {}
-            _ => return,
+            _ => return true,
         }
 
         // Turn off our read readiness
@@ -367,13 +393,24 @@ impl Inner {
             Ok(e) => {
                 trace!("schedule read success: {}", e);
                 io.read = State::Pending(buf, 0); // 0 is ignored on read side
-                mem::forget(me.clone())
+                mem::forget(me.clone());
+                true
             }
+
+            // If ERROR_PIPE_LISTENING happens then it's not a real read error,
+            // we just need to wait for a connect.
+            Err(ref e) if e.raw_os_error() == Some(ERROR_PIPE_LISTENING as i32) => {
+                false
+            }
+
+            // If some other error happened, though, we're now readable to give
+            // out the error.
             Err(e) => {
                 trace!("schedule read error: {}", e);
                 io.read = State::Err(e);
                 readiness.set_readiness(ready | Ready::readable())
                          .expect("event loop still seems gone");
+                true
             }
         }
     }
@@ -403,8 +440,22 @@ impl Inner {
             Err(e) => {
                 trace!("schedule write error: {}", e);
                 io.write = State::Err(e);
-                readiness.set_readiness(ready | Ready::writable())
-                         .expect("event loop still seems gone");
+                me.add_readiness(Ready::writable());
+            }
+        }
+    }
+
+    fn add_readiness(&self, ready: Ready) {
+        let readiness = self.readiness.borrow().unwrap();
+        readiness.set_readiness(ready | Ready::writable())
+                 .expect("event loop still seems gone");
+    }
+
+    fn post_register(me: &FromRawArc<Inner>) {
+        let mut io = me.io.lock().unwrap();
+        if Inner::schedule_read(&me, &mut io) {
+            if let State::None = io.write {
+                me.add_readiness(Ready::writable());
             }
         }
     }
@@ -431,15 +482,13 @@ fn connect_done(status: &CompletionStatus) {
         overlapped2arc!(status.overlapped(), Inner, connect)
     };
 
-    // Now that we're connected we should be writable
-    let readiness = me.readiness.borrow().unwrap();
-    let ready = readiness.readiness();
-    readiness.set_readiness(ready | Ready::writable())
-             .expect("event loop seems gone");
+    // Flag ourselves as no longer using the `connect` overlapped instances.
+    let prev = me.connecting.swap(false, SeqCst);
+    assert!(prev, "wasn't previously connecting");
 
-    // Also kick off a read
-    let mut io = me.io.lock().unwrap();
-    Inner::schedule_read(&me, &mut io);
+    // We essentially just finished a registration, so kick off a read and
+    // register write readiness.
+    Inner::post_register(&me);
 }
 
 fn read_done(status: &CompletionStatus) {
@@ -464,10 +513,7 @@ fn read_done(status: &CompletionStatus) {
     io.read = State::Ok(buf, 0);
 
     // Flag our readiness that we've got data.
-    let readiness = me.readiness.borrow().unwrap();
-    let ready = readiness.readiness();
-    readiness.set_readiness(ready | Ready::readable())
-             .expect("event loop seems gone");
+    me.add_readiness(Ready::readable());
 }
 
 fn write_done(status: &CompletionStatus) {
@@ -488,10 +534,7 @@ fn write_done(status: &CompletionStatus) {
     };
     let new_pos = pos + (status.bytes_transferred() as usize);
     if new_pos == buf.len() {
-        let readiness = me.readiness.borrow().unwrap();
-        let ready = readiness.readiness();
-        readiness.set_readiness(ready | Ready::writable())
-                 .expect("event loop seems gone");
+        me.add_readiness(Ready::writable());
     } else {
         Inner::schedule_write(&me, buf, new_pos, &mut io);
     }
