@@ -24,7 +24,7 @@ use mio::windows;
 use mio::{Registration, Poll, Token, PollOpt, Ready, Evented, SetReadiness};
 use miow::iocp::CompletionStatus;
 use miow::pipe;
-use winapi::ERROR_PIPE_LISTENING;
+use winapi::{ERROR_PIPE_LISTENING, OVERLAPPED_ENTRY};
 
 mod from_raw_arc;
 use from_raw_arc::FromRawArc;
@@ -45,7 +45,7 @@ macro_rules! overlapped2arc {
 
 pub struct NamedPipe {
     ready_registration: AtomicLazyCell<Registration>,
-    poll_registration: windows::Registration,
+    poll_registration: windows::Binding,
     inner: FromRawArc<Inner>,
 }
 
@@ -102,7 +102,7 @@ impl NamedPipe {
         // connection attempt. Afterwards interpret the return value and set
         // internal state accordingly.
         let res = unsafe {
-            let overlapped = &mut *self.inner.connect.as_mut_ptr();
+            let overlapped = miow::Overlapped::from_raw(self.inner.connect.as_mut_ptr());
             self.inner.handle.connect_overlapped(overlapped)
         };
 
@@ -314,7 +314,7 @@ impl FromRawHandle for NamedPipe {
     unsafe fn from_raw_handle(handle: RawHandle) -> NamedPipe {
         NamedPipe {
             ready_registration: AtomicLazyCell::new(),
-            poll_registration: windows::Registration::new(),
+            poll_registration: windows::Binding::new(),
             inner: FromRawArc::new(Inner {
                 handle: pipe::NamedPipe::from_raw_handle(handle),
                 readiness: AtomicLazyCell::new(),
@@ -382,7 +382,7 @@ impl Inner {
         // TODO: need to be smarter about buffer management here
         let mut buf = Vec::with_capacity(8 * 1024);
         let e = unsafe {
-            let overlapped = &mut *me.read.as_mut_ptr();
+            let overlapped = miow::Overlapped::from_raw(me.read.as_mut_ptr());
             let slice = slice::from_raw_parts_mut(buf.as_mut_ptr(),
                                                   buf.capacity());
             me.handle.read_overlapped(slice, overlapped)
@@ -426,7 +426,7 @@ impl Inner {
                  .expect("event loop seems gone");
 
         let e = unsafe {
-            let overlapped = &mut *me.write.as_mut_ptr();
+            let overlapped = miow::Overlapped::from_raw(me.write.as_mut_ptr());
             me.handle.write_overlapped(&buf[pos..], overlapped)
         };
 
@@ -463,8 +463,8 @@ impl Inner {
 
 unsafe fn cancel(handle: &AsRawHandle,
                  overlapped: &windows::Overlapped) -> io::Result<()> {
-    let overlapped = (*overlapped.as_mut_ptr()).raw();
-    let ret = kernel32::CancelIoEx(handle.as_raw_handle(), overlapped);
+    let ret = kernel32::CancelIoEx(handle.as_raw_handle(),
+                                   overlapped.as_mut_ptr());
     if ret == 0 {
         Err(io::Error::last_os_error())
     } else {
@@ -472,7 +472,8 @@ unsafe fn cancel(handle: &AsRawHandle,
     }
 }
 
-fn connect_done(status: &CompletionStatus) {
+fn connect_done(status: &OVERLAPPED_ENTRY) {
+    let status = CompletionStatus::from_entry(status);
     trace!("connect done");
 
     // Acquire the `FromRawArc<Inner>`. Note that we should be guaranteed that
@@ -491,7 +492,8 @@ fn connect_done(status: &CompletionStatus) {
     Inner::post_register(&me);
 }
 
-fn read_done(status: &CompletionStatus) {
+fn read_done(status: &OVERLAPPED_ENTRY) {
+    let status = CompletionStatus::from_entry(status);
     trace!("read finished, bytes={}", status.bytes_transferred());
 
     // Acquire the `FromRawArc<Inner>`. Note that we should be guaranteed that
@@ -516,7 +518,8 @@ fn read_done(status: &CompletionStatus) {
     me.add_readiness(Ready::readable());
 }
 
-fn write_done(status: &CompletionStatus) {
+fn write_done(status: &OVERLAPPED_ENTRY) {
+    let status = CompletionStatus::from_entry(status);
     trace!("write finished, bytes={}", status.bytes_transferred());
     // Acquire the `FromRawArc<Inner>`. Note that we should be guaranteed that
     // the refcount is available to us due to the `mem::forget` in

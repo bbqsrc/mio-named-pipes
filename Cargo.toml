@@ -16,7 +16,7 @@ kernel32-sys = "0.2"
 lazycell = "0.5"
 log = "0.3"
 mio = "0.6"
-miow = "0.1"
+miow = "0.1.4"
 winapi = "0.2"
 
 [dev-dependencies]
@@ -24,5 +24,5 @@ env_logger = { version = "0.3", default-features = false }
 rand = "0.3"
 
 [replace.'mio:0.6.1']
-git = "https://github.com/alexcrichton/mio"
+git = 'https://github.com/alexcrichton/mio'
 branch = 'custom-iocp'
