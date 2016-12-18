@@ -11,7 +11,7 @@ description = """
 Windows named pipe bindings for mio.
 """
 
-[dependencies]
+[target.'cfg(windows)'.dependencies]
 kernel32-sys = "0.2"
 lazycell = "0.5"
 log = "0.3"
