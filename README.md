@@ -2,7 +2,7 @@
 
 [![Build status](https://ci.appveyor.com/api/projects/status/y0ct01srewnhhesn?svg=true)](https://ci.appveyor.com/project/alexcrichton/mio-named-pipes)
 
-[Documentation](http://alexcrichton.com/mio-named-pipes)
+[Documentation](https://docs.rs/mio-named-pipes/0.1/x86_64-pc-windows-msvc/mio_named_pipes/)
 
 A library for integrating Windows [Named Pipes] with [mio].
 

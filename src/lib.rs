@@ -1,4 +1,54 @@
+//! Windows named pipes bindings for mio.
+//!
+//! This crate implements bindings for named pipes for the mio crate. This
+//! crate compiles on all platforms but only contains anything on Windows.
+//! Currently this crate requires mio 0.6.2.
+//!
+//! On Windows, mio is implemented with an IOCP object at the heart of its
+//! `Poll` implementation. For named pipes, this means that all I/O is done in
+//! an overlapped fashion and the named pipes themselves are registered with
+//! mio's internal IOCP object. Essentially, this crate is using IOCP for
+//! bindings with named pipes.
+//!
+//! Note, though, that IOCP is a *completion* based model whereas mio expects a
+//! *readiness* based model. As a result this crate, like with TCP objects in
+//! mio, has internal buffering to translate the completion model to a readiness
+//! model. This means that this crate is not a zero-cost binding over named
+//! pipes on Windows, but rather approximates the performance of mio's TCP
+//! implementation on Windows.
+//!
+//! # Trait implementations
+//!
+//! The `Read` and `Write` traits are implemented for `NamedPipe` and for
+//! `&NamedPipe`. This represents that a named pipe can be concurrently read and
+//! written to and also can be read and written to at all. Typically a named
+//! pipe needs to be connected to a client before it can be read or written,
+//! however.
+//!
+//! Note that for I/O operations on a named pipe to succeed then the named pipe
+//! needs to be associated with an event loop. Until this happens all I/O
+//! operations will return a "would block" error.
+//!
+//! # Managing connections
+//!
+//! The `NamedPipe` type supports a `connect` method to connect to a client and
+//! a `disconnect` method to disconnect from that client. These two methods only
+//! work once a named pipe is associated with an event loop.
+//!
+//! The `connect` method will succeed asynchronously and a completion can be
+//! detected once the object receives a writable notification.
+//!
+//! # Named pipe clients
+//!
+//! Currently to create a client of a named pipe server then you can use the
+//! `OpenOptions` type in the standard library to create a `File` that connects
+//! to a named pipe. Afterwards you can use the `into_raw_handle` method coupled
+//! with the `NamedPipe::from_raw_handle` method to convert that to a named pipe
+//! that can operate asynchronously. Don't forget to pass the
+//! `FILE_FLAG_OVERLAPPED` flag when opening the `File`.
+
 #![cfg(windows)]
+#![deny(missing_docs)]
 
 extern crate kernel32;
 extern crate lazycell;
@@ -43,6 +93,12 @@ macro_rules! overlapped2arc {
     })
 }
 
+/// Representation of a named pipe on Windows.
+///
+/// This structure internally contains a `HANDLE` which represents the named
+/// pipe, and also maintains state associated with the mio event loop and active
+/// I/O operations that have been scheduled to translate IOCP to a readiness
+/// model.
 pub struct NamedPipe {
     ready_registration: AtomicLazyCell<Registration>,
     poll_registration: windows::Binding,
@@ -65,6 +121,7 @@ struct Inner {
 struct Io {
     read: State,
     write: State,
+    connect_error: Option<io::Error>,
 }
 
 enum State {
@@ -75,6 +132,15 @@ enum State {
 }
 
 impl NamedPipe {
+    /// Creates a new named pipe at the specified `addr` given a "reasonable
+    /// set" of initial configuration options.
+    ///
+    /// Currently the configuration options are the [same as miow]. To change
+    /// these options, you can create a custom named pipe yourself and then use
+    /// the `FromRawHandle` constructor to convert that type to an instance of a
+    /// `NamedPipe` in this crate.
+    ///
+    /// [same as miow]: https://docs.rs/miow/0.1.4/x86_64-pc-windows-msvc/miow/pipe/struct.NamedPipe.html#method.new
     pub fn new<A: AsRef<OsStr>>(addr: A) -> io::Result<NamedPipe> {
         NamedPipe::_new(addr.as_ref())
     }
@@ -86,6 +152,26 @@ impl NamedPipe {
         }
     }
 
+    /// Attempts to call `ConnectNamedPipe`, if possible.
+    ///
+    /// This function will attempt to connect this pipe to a client in an
+    /// asynchronous fashion. If the function immediately establishes a
+    /// connection to a client then `Ok(())` is returned. Otherwise if a
+    /// connection attempt was issued and is now in progress then a "would
+    /// block" error is returned.
+    ///
+    /// When the connection is finished then this object will be flagged as
+    /// being ready for a write, or otherwise in the writable state.
+    ///
+    /// # Errors
+    ///
+    /// This function will return a "would block" error if the pipe has not yet
+    /// been registered with an event loop, if the connection operation has
+    /// previously been issued but has not yet completed, or if the connect
+    /// itself was issued and didn't finish immediately.
+    ///
+    /// Normal I/O errors from the call to `ConnectNamedPipe` are returned
+    /// immediately.
     pub fn connect(&self) -> io::Result<()> {
         // Make sure we're associated with an IOCP object
         if self.ready_registration.borrow().is_none() {
@@ -95,7 +181,7 @@ impl NamedPipe {
         // "Acquire the connecting lock" or otherwise just make sure we're the
         // only operation that's using the `connect` overlapped instance.
         if self.inner.connecting.swap(true, SeqCst) {
-            return Err(io::Error::new(io::ErrorKind::Other, "already connecting"))
+            return Err(mio::would_block())
         }
 
         // Now that we've flagged ourselves in the connecting state, issue the
@@ -126,7 +212,7 @@ impl NamedPipe {
             Ok(false) => {
                 trace!("connect in progress");
                 mem::forget(self.inner.clone());
-                Ok(())
+                Err(mio::would_block())
             }
 
             // TODO: are we sure no IOCP notification comes in here?
@@ -138,6 +224,28 @@ impl NamedPipe {
         }
     }
 
+    /// Takes any internal error that has happened after the last I/O operation
+    /// which hasn't been retrieved yet.
+    ///
+    /// This is particularly useful when detecting failed attempts to `connect`.
+    /// After a completed `connect` flags this pipe as writable then callers
+    /// must invoke this method to determine whether the connection actually
+    /// succeeded. If this function returns `None` then a client is connected,
+    /// otherwise it returns an error of what happened and a client shouldn't be
+    /// connected.
+    pub fn take_error(&self) -> io::Result<Option<io::Error>> {
+        Ok(self.inner.io.lock().unwrap().connect_error.take())
+    }
+
+    /// Disconnects this named pipe from a connected client.
+    ///
+    /// This function will disconnect the pipe from a connected client, if any,
+    /// transitively calling the `DisconnectNamedPipe` function. If the
+    /// disconnection is successful then this object will no longer be readable
+    /// or writable.
+    ///
+    /// After a `disconnect` is issued, then a `connect` may be called again to
+    /// connect to another client.
     pub fn disconnect(&self) -> io::Result<()> {
         try!(self.inner.handle.disconnect());
         let readiness = self.inner.readiness.borrow().unwrap();
@@ -325,6 +433,7 @@ impl FromRawHandle for NamedPipe {
                 io: Mutex::new(Io {
                     read: State::None,
                     write: State::None,
+                    connect_error: None,
                 }),
             }),
         }
@@ -487,8 +596,17 @@ fn connect_done(status: &OVERLAPPED_ENTRY) {
     let prev = me.connecting.swap(false, SeqCst);
     assert!(prev, "wasn't previously connecting");
 
-    // We essentially just finished a registration, so kick off a read and
-    // register write readiness.
+    // Stash away our connect error if one happened
+    debug_assert_eq!(status.bytes_transferred(), 0);
+    unsafe {
+        match me.handle.result(status.overlapped()) {
+            Ok(n) => debug_assert_eq!(n, 0),
+            Err(e) => me.io.lock().unwrap().connect_error = Some(e),
+        }
+    }
+
+    // We essentially just finished a registration, so kick off a
+    // read and register write readiness.
     Inner::post_register(&me);
 }
 
@@ -510,9 +628,18 @@ fn read_done(status: &OVERLAPPED_ENTRY) {
         _ => unreachable!(),
     };
     unsafe {
-        buf.set_len(status.bytes_transferred() as usize);
+        match me.handle.result(status.overlapped()) {
+            Ok(n) => {
+                debug_assert_eq!(status.bytes_transferred() as usize, n);
+                buf.set_len(status.bytes_transferred() as usize);
+                io.read = State::Ok(buf, 0);
+            }
+            Err(e) => {
+                debug_assert_eq!(status.bytes_transferred(), 0);
+                io.read = State::Err(e);
+            }
+        }
     }
-    io.read = State::Ok(buf, 0);
 
     // Flag our readiness that we've got data.
     me.add_readiness(Ready::readable());
@@ -535,10 +662,23 @@ fn write_done(status: &OVERLAPPED_ENTRY) {
         State::Pending(buf, pos) => (buf, pos),
         _ => unreachable!(),
     };
-    let new_pos = pos + (status.bytes_transferred() as usize);
-    if new_pos == buf.len() {
-        me.add_readiness(Ready::writable());
-    } else {
-        Inner::schedule_write(&me, buf, new_pos, &mut io);
+
+    unsafe {
+        match me.handle.result(status.overlapped()) {
+            Ok(n) => {
+                debug_assert_eq!(status.bytes_transferred() as usize, n);
+                let new_pos = pos + (status.bytes_transferred() as usize);
+                if new_pos == buf.len() {
+                    me.add_readiness(Ready::writable());
+                } else {
+                    Inner::schedule_write(&me, buf, new_pos, &mut io);
+                }
+            }
+            Err(e) => {
+                debug_assert_eq!(status.bytes_transferred(), 0);
+                io.write = State::Err(e);
+                me.add_readiness(Ready::writable());
+            }
+        }
     }
 }
