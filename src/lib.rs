@@ -74,7 +74,7 @@ use mio::windows;
 use mio::{Registration, Poll, Token, PollOpt, Ready, Evented, SetReadiness};
 use miow::iocp::CompletionStatus;
 use miow::pipe;
-use winapi::{ERROR_PIPE_LISTENING, OVERLAPPED_ENTRY};
+use winapi::{ERROR_PIPE_LISTENING, OVERLAPPED_ENTRY, ERROR_BROKEN_PIPE};
 
 mod from_raw_arc;
 use from_raw_arc::FromRawArc;
@@ -632,6 +632,10 @@ fn read_done(status: &OVERLAPPED_ENTRY) {
             Ok(n) => {
                 debug_assert_eq!(status.bytes_transferred() as usize, n);
                 buf.set_len(status.bytes_transferred() as usize);
+                io.read = State::Ok(buf, 0);
+            }
+            Err(ref e) if e.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) => {
+                debug_assert_eq!(status.bytes_transferred(), 0);
                 io.read = State::Ok(buf, 0);
             }
             Err(e) => {
