@@ -9,6 +9,7 @@ extern crate log;
 
 use std::fs::OpenOptions;
 use std::io::prelude::*;
+use std::io;
 use std::os::windows::fs::*;
 use std::os::windows::io::*;
 use std::time::Duration;
@@ -127,7 +128,8 @@ fn connect_before_client() {
     let e = events.iter().collect::<Vec<_>>();
     debug!("events {:?}", e);
     assert_eq!(e.len(), 0);
-    t!(server.connect());
+    assert_eq!(server.connect().err().unwrap().kind(),
+               io::ErrorKind::WouldBlock);
 
     let client = client(&name);
     t!(poll.register(&client,
@@ -249,7 +251,8 @@ fn connect_twice() {
     let mut buf = [0; 10];
     assert_eq!(t!(server.read(&mut buf)), 0);
     t!(server.disconnect());
-    t!(server.connect());
+    assert_eq!(server.connect().err().unwrap().kind(),
+               io::ErrorKind::WouldBlock);
 
     let c2 = client(&name);
     t!(poll.register(&c2,
