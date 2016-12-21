@@ -556,7 +556,7 @@ impl Inner {
 
     fn add_readiness(&self, ready: Ready) {
         let readiness = self.readiness.borrow().unwrap();
-        readiness.set_readiness(ready | Ready::writable())
+        readiness.set_readiness(ready | readiness)
                  .expect("event loop still seems gone");
     }
 
