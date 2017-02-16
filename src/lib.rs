@@ -100,7 +100,7 @@ macro_rules! overlapped2arc {
 /// I/O operations that have been scheduled to translate IOCP to a readiness
 /// model.
 pub struct NamedPipe {
-    ready_registration: AtomicLazyCell<Registration>,
+    ready_registration: Mutex<Option<Registration>>,
     poll_registration: windows::Binding,
     inner: FromRawArc<Inner>,
 }
@@ -129,6 +129,13 @@ enum State {
     Pending(Vec<u8>, usize),
     Ok(Vec<u8>, usize),
     Err(io::Error),
+}
+
+fn _assert_kinds() {
+    fn _assert_send<T: Send>() {}
+    fn _assert_sync<T: Sync>() {}
+    _assert_send::<NamedPipe>();
+    _assert_sync::<NamedPipe>();
 }
 
 impl NamedPipe {
@@ -174,7 +181,7 @@ impl NamedPipe {
     /// immediately.
     pub fn connect(&self) -> io::Result<()> {
         // Make sure we're associated with an IOCP object
-        if self.ready_registration.borrow().is_none() {
+        if self.ready_registration.lock().unwrap().is_none() {
             return Err(mio::would_block())
         }
 
@@ -274,7 +281,7 @@ impl Write for NamedPipe {
 impl<'a> Read for &'a NamedPipe {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         // Make sure we're registered
-        if self.ready_registration.borrow().is_none() {
+        if self.ready_registration.lock().unwrap().is_none() {
             return Err(mio::would_block())
         }
 
@@ -320,7 +327,7 @@ impl<'a> Read for &'a NamedPipe {
 impl<'a> Write for &'a NamedPipe {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         // Make sure we're registered
-        if self.ready_registration.borrow().is_none() {
+        if self.ready_registration.lock().unwrap().is_none() {
             return Err(mio::would_block())
         }
 
@@ -362,10 +369,12 @@ impl Evented for NamedPipe {
         // already succeeded (or is in the process of succeeding) elsewhere so
         // we bail out.
         let (r, s) = Registration::new(poll, token, interest, opts);
-        match self.ready_registration.fill(r) {
-            Ok(()) => {}
-            Err(_) => return Ok(()),
+        let mut slot = self.ready_registration.lock().unwrap();
+        if slot.is_some() {
+            return Ok(())
         }
+        *slot = Some(r);
+        drop(slot);
         assert!(self.inner.readiness.fill(s).is_ok());
         Inner::post_register(&self.inner);
         Ok(())
@@ -386,8 +395,8 @@ impl Evented for NamedPipe {
         // At this point we should for sure have `ready_registration` unless
         // we're racing with `register` above, so just return a bland error if
         // the borrow fails.
-        match self.ready_registration.borrow() {
-            Some(r) => try!(r.update(poll, token, interest, opts)),
+        match *self.ready_registration.lock().unwrap() {
+            Some(ref r) => try!(r.update(poll, token, interest, opts)),
             None => {
                 return Err(io::Error::new(io::ErrorKind::Other, "not registered"))
             }
@@ -405,8 +414,8 @@ impl Evented for NamedPipe {
         }
 
         // Deregister the registration, which this should always succeed.
-        match self.ready_registration.borrow() {
-            Some(r) => r.deregister(poll),
+        match *self.ready_registration.lock().unwrap() {
+            Some(ref r) => r.deregister(poll),
             None => Err(io::Error::new(io::ErrorKind::Other, "not registered")),
         }
     }
@@ -421,7 +430,7 @@ impl AsRawHandle for NamedPipe {
 impl FromRawHandle for NamedPipe {
     unsafe fn from_raw_handle(handle: RawHandle) -> NamedPipe {
         NamedPipe {
-            ready_registration: AtomicLazyCell::new(),
+            ready_registration: Mutex::new(None),
             poll_registration: windows::Binding::new(),
             inner: FromRawArc::new(Inner {
                 handle: pipe::NamedPipe::from_raw_handle(handle),
