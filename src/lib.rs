@@ -318,7 +318,11 @@ impl<'a> Read for &'a NamedPipe {
             // we schedule a new one.
             State::Err(e) => {
                 Inner::schedule_read(&self.inner, &mut state);
-                Err(e)
+                if e.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) {
+                    Ok(0)
+                } else {
+                    Err(e)
+                }
             }
         }
     }
@@ -641,10 +645,6 @@ fn read_done(status: &OVERLAPPED_ENTRY) {
             Ok(n) => {
                 debug_assert_eq!(status.bytes_transferred() as usize, n);
                 buf.set_len(status.bytes_transferred() as usize);
-                io.read = State::Ok(buf, 0);
-            }
-            Err(ref e) if e.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) => {
-                debug_assert_eq!(status.bytes_transferred(), 0);
                 io.read = State::Ok(buf, 0);
             }
             Err(e) => {
