@@ -56,11 +56,11 @@ fn writable_after_register() {
     let poll = t!(Poll::new());
     t!(poll.register(&server,
                      Token(0),
-                     Ready::all(),
+                     Ready::writable() | Ready::readable(),
                      PollOpt::edge()));
     t!(poll.register(&client,
                      Token(1),
-                     Ready::all(),
+                     Ready::writable(),
                      PollOpt::edge()));
 
     let mut events = Events::with_capacity(128);
@@ -69,10 +69,10 @@ fn writable_after_register() {
     let events = events.iter().collect::<Vec<_>>();
     debug!("events {:?}", events);
     assert!(events.iter().any(|e| {
-        e.token() == Token(0) && e.kind() == Ready::writable()
+        e.token() == Token(0) && e.readiness() == Ready::writable()
     }));
     assert!(events.iter().any(|e| {
-        e.token() == Token(1) && e.kind() == Ready::writable()
+        e.token() == Token(1) && e.readiness() == Ready::writable()
     }));
 }
 
@@ -84,11 +84,11 @@ fn write_then_read() {
     let poll = t!(Poll::new());
     t!(poll.register(&server,
                      Token(0),
-                     Ready::all(),
+                     Ready::readable() | Ready::writable(),
                      PollOpt::edge()));
     t!(poll.register(&client,
                      Token(1),
-                     Ready::all(),
+                     Ready::readable() | Ready::writable(),
                      PollOpt::edge()));
 
     let mut events = Events::with_capacity(128);
@@ -101,7 +101,7 @@ fn write_then_read() {
         let events = events.iter().collect::<Vec<_>>();
         debug!("events {:?}", events);
         if let Some(event) = events.iter().find(|e| e.token() == Token(0)) {
-            if event.kind().is_readable() {
+            if event.readiness().is_readable() {
                 break
             }
         }
@@ -120,7 +120,7 @@ fn connect_before_client() {
     let poll = t!(Poll::new());
     t!(poll.register(&server,
                      Token(0),
-                     Ready::all(),
+                     Ready::readable() | Ready::writable(),
                      PollOpt::edge()));
 
     let mut events = Events::with_capacity(128);
@@ -134,14 +134,14 @@ fn connect_before_client() {
     let client = client(&name);
     t!(poll.register(&client,
                      Token(1),
-                     Ready::all(),
+                     Ready::readable() | Ready::writable(),
                      PollOpt::edge()));
     loop {
         t!(poll.poll(&mut events, None));
         let e = events.iter().collect::<Vec<_>>();
         debug!("events {:?}", e);
         if let Some(event) = e.iter().find(|e| e.token() == Token(0)) {
-            if event.kind().is_writable() {
+            if event.readiness().is_writable() {
                 break
             }
         }
@@ -156,7 +156,7 @@ fn connect_after_client() {
     let poll = t!(Poll::new());
     t!(poll.register(&server,
                      Token(0),
-                     Ready::all(),
+                     Ready::readable() | Ready::writable(),
                      PollOpt::edge()));
 
     let mut events = Events::with_capacity(128);
@@ -168,7 +168,7 @@ fn connect_after_client() {
     let client = client(&name);
     t!(poll.register(&client,
                      Token(1),
-                     Ready::all(),
+                     Ready::readable() | Ready::writable(),
                      PollOpt::edge()));
     t!(server.connect());
     loop {
@@ -176,7 +176,7 @@ fn connect_after_client() {
         let e = events.iter().collect::<Vec<_>>();
         debug!("events {:?}", e);
         if let Some(event) = e.iter().find(|e| e.token() == Token(0)) {
-            if event.kind().is_writable() {
+            if event.readiness().is_writable() {
                 break
             }
         }
@@ -191,11 +191,11 @@ fn write_then_drop() {
     let poll = t!(Poll::new());
     t!(poll.register(&server,
                      Token(0),
-                     Ready::all(),
+                     Ready::readable() | Ready::writable(),
                      PollOpt::edge()));
     t!(poll.register(&client,
                      Token(1),
-                     Ready::all(),
+                     Ready::readable() | Ready::writable(),
                      PollOpt::edge()));
     assert_eq!(t!(client.write(b"1234")), 4);
     drop(client);
@@ -207,7 +207,7 @@ fn write_then_drop() {
         let events = events.iter().collect::<Vec<_>>();
         debug!("events {:?}", events);
         if let Some(event) = events.iter().find(|e| e.token() == Token(0)) {
-            if event.kind().is_readable() {
+            if event.readiness().is_readable() {
                 break
             }
         }
@@ -227,11 +227,11 @@ fn connect_twice() {
     let poll = t!(Poll::new());
     t!(poll.register(&server,
                      Token(0),
-                     Ready::all(),
+                     Ready::readable() | Ready::writable(),
                      PollOpt::edge()));
     t!(poll.register(&c1,
                      Token(1),
-                     Ready::all(),
+                     Ready::readable() | Ready::writable(),
                      PollOpt::edge()));
     drop(c1);
 
@@ -242,7 +242,7 @@ fn connect_twice() {
         let events = events.iter().collect::<Vec<_>>();
         debug!("events {:?}", events);
         if let Some(event) = events.iter().find(|e| e.token() == Token(0)) {
-            if event.kind().is_readable() {
+            if event.readiness().is_readable() {
                 break
             }
         }
@@ -257,7 +257,7 @@ fn connect_twice() {
     let c2 = client(&name);
     t!(poll.register(&c2,
                      Token(2),
-                     Ready::all(),
+                     Ready::readable() | Ready::writable(),
                      PollOpt::edge()));
 
     loop {
@@ -265,7 +265,7 @@ fn connect_twice() {
         let events = events.iter().collect::<Vec<_>>();
         debug!("events {:?}", events);
         if let Some(event) = events.iter().find(|e| e.token() == Token(0)) {
-            if event.kind().is_writable() {
+            if event.readiness().is_writable() {
                 break
             }
         }

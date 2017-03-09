@@ -51,7 +51,6 @@
 #![deny(missing_docs)]
 
 extern crate kernel32;
-extern crate lazycell;
 #[macro_use]
 extern crate log;
 extern crate mio;
@@ -69,7 +68,6 @@ use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::SeqCst;
 
-use lazycell::AtomicLazyCell;
 use mio::windows;
 use mio::{Registration, Poll, Token, PollOpt, Ready, Evented, SetReadiness};
 use miow::iocp::CompletionStatus;
@@ -93,6 +91,10 @@ macro_rules! overlapped2arc {
     })
 }
 
+fn would_block() -> io::Error {
+    io::Error::new(io::ErrorKind::WouldBlock, "would block")
+}
+
 /// Representation of a named pipe on Windows.
 ///
 /// This structure internally contains a `HANDLE` which represents the named
@@ -100,14 +102,15 @@ macro_rules! overlapped2arc {
 /// I/O operations that have been scheduled to translate IOCP to a readiness
 /// model.
 pub struct NamedPipe {
-    ready_registration: Mutex<Option<Registration>>,
+    registered: AtomicBool,
+    ready_registration: Registration,
     poll_registration: windows::Binding,
     inner: FromRawArc<Inner>,
 }
 
 struct Inner {
     handle: pipe::NamedPipe,
-    readiness: AtomicLazyCell<SetReadiness>,
+    readiness: SetReadiness,
 
     connect: windows::Overlapped,
     connecting: AtomicBool,
@@ -181,21 +184,21 @@ impl NamedPipe {
     /// immediately.
     pub fn connect(&self) -> io::Result<()> {
         // Make sure we're associated with an IOCP object
-        if self.ready_registration.lock().unwrap().is_none() {
-            return Err(mio::would_block())
+        if !self.registered() {
+            return Err(would_block())
         }
 
         // "Acquire the connecting lock" or otherwise just make sure we're the
         // only operation that's using the `connect` overlapped instance.
         if self.inner.connecting.swap(true, SeqCst) {
-            return Err(mio::would_block())
+            return Err(would_block())
         }
 
         // Now that we've flagged ourselves in the connecting state, issue the
         // connection attempt. Afterwards interpret the return value and set
         // internal state accordingly.
         let res = unsafe {
-            let overlapped = miow::Overlapped::from_raw(self.inner.connect.as_mut_ptr());
+            let overlapped = self.inner.connect.as_mut_ptr();
             self.inner.handle.connect_overlapped(overlapped)
         };
 
@@ -219,7 +222,7 @@ impl NamedPipe {
             Ok(false) => {
                 trace!("connect in progress");
                 mem::forget(self.inner.clone());
-                Err(mio::would_block())
+                Err(would_block())
             }
 
             // TODO: are we sure no IOCP notification comes in here?
@@ -255,10 +258,13 @@ impl NamedPipe {
     /// connect to another client.
     pub fn disconnect(&self) -> io::Result<()> {
         try!(self.inner.handle.disconnect());
-        let readiness = self.inner.readiness.borrow().unwrap();
-        readiness.set_readiness(Ready::none())
+        self.inner.readiness.set_readiness(Ready::empty())
                  .expect("event loop seems gone");
         Ok(())
+    }
+
+    fn registered(&self) -> bool {
+        self.registered.load(SeqCst)
     }
 }
 
@@ -281,20 +287,20 @@ impl Write for NamedPipe {
 impl<'a> Read for &'a NamedPipe {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         // Make sure we're registered
-        if self.ready_registration.lock().unwrap().is_none() {
-            return Err(mio::would_block())
+        if !self.registered() {
+            return Err(would_block())
         }
 
         let mut state = self.inner.io.lock().unwrap();
         match mem::replace(&mut state.read, State::None) {
             // In theory not possible with `ready_registration` checked above,
             // but return would block for now.
-            State::None => Err(mio::would_block()),
+            State::None => Err(would_block()),
 
             // A read is in flight, still waiting for it to finish
             State::Pending(buf, amt) => {
                 state.read = State::Pending(buf, amt);
-                Err(mio::would_block())
+                Err(would_block())
             }
 
             // We previously read something into `data`, try to copy out some
@@ -331,15 +337,15 @@ impl<'a> Read for &'a NamedPipe {
 impl<'a> Write for &'a NamedPipe {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         // Make sure we're registered
-        if self.ready_registration.lock().unwrap().is_none() {
-            return Err(mio::would_block())
+        if !self.registered() {
+            return Err(would_block())
         }
 
         // Make sure there's no writes pending
         let mut io = self.inner.io.lock().unwrap();
         match io.write {
             State::None => {}
-            _ => return Err(mio::would_block())
+            _ => return Err(would_block())
         }
 
         // Move `buf` onto the heap and fire off the write
@@ -367,19 +373,8 @@ impl Evented for NamedPipe {
                                                         token,
                                                         poll));
         }
-
-        // Next, create our `SetReadiness` pair we're going to work with. Here
-        // if we fail in `ready_registration` then we assume that registration
-        // already succeeded (or is in the process of succeeding) elsewhere so
-        // we bail out.
-        let (r, s) = Registration::new(poll, token, interest, opts);
-        let mut slot = self.ready_registration.lock().unwrap();
-        if slot.is_some() {
-            return Ok(())
-        }
-        *slot = Some(r);
-        drop(slot);
-        assert!(self.inner.readiness.fill(s).is_ok());
+        try!(poll.register(&self.ready_registration, token, interest, opts));
+        self.registered.store(true, SeqCst);
         Inner::post_register(&self.inner);
         Ok(())
     }
@@ -399,12 +394,7 @@ impl Evented for NamedPipe {
         // At this point we should for sure have `ready_registration` unless
         // we're racing with `register` above, so just return a bland error if
         // the borrow fails.
-        match *self.ready_registration.lock().unwrap() {
-            Some(ref r) => try!(r.update(poll, token, interest, opts)),
-            None => {
-                return Err(io::Error::new(io::ErrorKind::Other, "not registered"))
-            }
-        }
+        try!(poll.reregister(&self.ready_registration, token, interest, opts));
 
         Inner::post_register(&self.inner);
 
@@ -416,12 +406,7 @@ impl Evented for NamedPipe {
         unsafe {
             try!(self.poll_registration.deregister_handle(&self.inner.handle, poll));
         }
-
-        // Deregister the registration, which this should always succeed.
-        match *self.ready_registration.lock().unwrap() {
-            Some(ref r) => r.deregister(poll),
-            None => Err(io::Error::new(io::ErrorKind::Other, "not registered")),
-        }
+        poll.deregister(&self.ready_registration)
     }
 }
 
@@ -433,12 +418,14 @@ impl AsRawHandle for NamedPipe {
 
 impl FromRawHandle for NamedPipe {
     unsafe fn from_raw_handle(handle: RawHandle) -> NamedPipe {
+        let (r, s) = Registration::new2();
         NamedPipe {
-            ready_registration: Mutex::new(None),
+            registered: AtomicBool::new(false),
+            ready_registration: r,
             poll_registration: windows::Binding::new(),
             inner: FromRawArc::new(Inner {
                 handle: pipe::NamedPipe::from_raw_handle(handle),
-                readiness: AtomicLazyCell::new(),
+                readiness: s,
                 connect: windows::Overlapped::new(connect_done),
                 connecting: AtomicBool::new(false),
                 read: windows::Overlapped::new(read_done),
@@ -494,17 +481,16 @@ impl Inner {
         }
 
         // Turn off our read readiness
-        let readiness = me.readiness.borrow().unwrap();
-        let ready = readiness.readiness();
-        readiness.set_readiness(ready & !Ready::readable())
-                 .expect("event loop seems gone");
+        let ready = me.readiness.readiness();
+        me.readiness.set_readiness(ready & !Ready::readable())
+                    .expect("event loop seems gone");
 
         // Allocate a buffer and schedule the read.
         //
         // TODO: need to be smarter about buffer management here
         let mut buf = Vec::with_capacity(8 * 1024);
         let e = unsafe {
-            let overlapped = miow::Overlapped::from_raw(me.read.as_mut_ptr());
+            let overlapped = me.read.as_mut_ptr();
             let slice = slice::from_raw_parts_mut(buf.as_mut_ptr(),
                                                   buf.capacity());
             me.handle.read_overlapped(slice, overlapped)
@@ -513,7 +499,7 @@ impl Inner {
         match e {
             // See `connect` above for the rationale behind `forget`
             Ok(e) => {
-                trace!("schedule read success: {}", e);
+                trace!("schedule read success: {:?}", e);
                 io.read = State::Pending(buf, 0); // 0 is ignored on read side
                 mem::forget(me.clone());
                 true
@@ -530,8 +516,8 @@ impl Inner {
             Err(e) => {
                 trace!("schedule read error: {}", e);
                 io.read = State::Err(e);
-                readiness.set_readiness(ready | Ready::readable())
-                         .expect("event loop still seems gone");
+                me.readiness.set_readiness(ready | Ready::readable())
+                            .expect("event loop still seems gone");
                 true
             }
         }
@@ -542,20 +528,19 @@ impl Inner {
                       pos: usize,
                       io: &mut Io) {
         // Very similar to `schedule_read` above, just done for the write half.
-        let readiness = me.readiness.borrow().unwrap();
-        let ready = readiness.readiness();
-        readiness.set_readiness(ready & !Ready::writable())
-                 .expect("event loop seems gone");
+        let ready = me.readiness.readiness();
+        me.readiness.set_readiness(ready & !Ready::writable())
+                    .expect("event loop seems gone");
 
         let e = unsafe {
-            let overlapped = miow::Overlapped::from_raw(me.write.as_mut_ptr());
+            let overlapped = me.write.as_mut_ptr();
             me.handle.write_overlapped(&buf[pos..], overlapped)
         };
 
         match e {
             // See `connect` above for the rationale behind `forget`
             Ok(e) => {
-                trace!("schedule write success: {}", e);
+                trace!("schedule write success: {:?}", e);
                 io.write = State::Pending(buf, pos);
                 mem::forget(me.clone())
             }
@@ -568,9 +553,8 @@ impl Inner {
     }
 
     fn add_readiness(&self, ready: Ready) {
-        let readiness = self.readiness.borrow().unwrap();
-        readiness.set_readiness(ready | readiness.readiness())
-                 .expect("event loop still seems gone");
+        self.readiness.set_readiness(ready | self.readiness.readiness())
+                      .expect("event loop still seems gone");
     }
 
     fn post_register(me: &FromRawArc<Inner>) {
