@@ -18,7 +18,7 @@ miow = "0.3"
 
 [target.'cfg(windows)'.dependencies.winapi]
 version = "0.3"
-features = ["winerror", "ioapiset", "minwinbase"]
+features = ["winerror", "ioapiset", "minwinbase", "winbase"]
 
 [dev-dependencies]
 env_logger = { version = "0.4", default-features = false }
