@@ -93,7 +93,7 @@ macro_rules! overlapped2arc {
 }
 
 fn would_block() -> io::Error {
-    io::Error::new(io::ErrorKind::WouldBlock, "would block")
+    io::ErrorKind::WouldBlock.into()
 }
 
 /// Representation of a named pipe on Windows.
