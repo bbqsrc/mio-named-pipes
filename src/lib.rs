@@ -569,8 +569,8 @@ impl Inner {
     }
 }
 
-unsafe fn cancel(handle: &AsRawHandle,
-                 overlapped: &windows::Overlapped) -> io::Result<()> {
+unsafe fn cancel<T: AsRawHandle>(handle: &T,
+                                 overlapped: &windows::Overlapped) -> io::Result<()> {
     let ret = CancelIoEx(handle.as_raw_handle(), overlapped.as_mut_ptr() as *mut _);
     if ret == 0 {
         Err(io::Error::last_os_error())
