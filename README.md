@@ -1,6 +1,6 @@
 # mio-named-pipes
 
-[![Build status](https://ci.appveyor.com/api/projects/status/y0ct01srewnhhesn?svg=true)](https://ci.appveyor.com/project/alexcrichton/mio-named-pipes)
+![Run tests](https://github.com/bbqsrc/mio-named-pipes/workflows/Run%20tests/badge.svg)
 
 [Documentation](https://docs.rs/mio-named-pipes/0.1/x86_64-pc-windows-msvc/mio_named_pipes/)
 
@@ -45,5 +45,5 @@ at your option.
 ### Contribution
 
 Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in Serde by you, as defined in the Apache-2.0 license, shall be
+for inclusion in mio-named-pipes by you, as defined in the Apache-2.0 license, shall be
 dual licensed as above, without any additional terms or conditions.
