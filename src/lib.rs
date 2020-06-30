@@ -58,17 +58,17 @@ extern crate winapi;
 
 use std::ffi::OsStr;
 use std::fmt;
-use std::io::prelude::*;
 use std::io;
+use std::io::prelude::*;
 use std::mem;
 use std::os::windows::io::*;
 use std::slice;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::SeqCst;
+use std::sync::Mutex;
 
 use mio::windows;
-use mio::{Registration, Poll, Token, PollOpt, Ready, Evented, SetReadiness};
+use mio::{Evented, Poll, PollOpt, Ready, Registration, SetReadiness, Token};
 use miow::iocp::CompletionStatus;
 use miow::pipe;
 use winapi::shared::winerror::*;
@@ -76,7 +76,7 @@ use winapi::um::ioapiset::*;
 use winapi::um::minwinbase::*;
 
 mod from_raw_arc;
-use from_raw_arc::FromRawArc;
+use crate::from_raw_arc::FromRawArc;
 
 macro_rules! offset_of {
     ($t:ty, $($field:ident).+) => (
@@ -186,13 +186,13 @@ impl NamedPipe {
     pub fn connect(&self) -> io::Result<()> {
         // Make sure we're associated with an IOCP object
         if !self.registered() {
-            return Err(would_block())
+            return Err(would_block());
         }
 
         // "Acquire the connecting lock" or otherwise just make sure we're the
         // only operation that's using the `connect` overlapped instance.
         if self.inner.connecting.swap(true, SeqCst) {
-            return Err(would_block())
+            return Err(would_block());
         }
 
         // Now that we've flagged ourselves in the connecting state, issue the
@@ -291,7 +291,7 @@ impl<'a> Read for &'a NamedPipe {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         // Make sure we're registered
         if !self.registered() {
-            return Err(would_block())
+            return Err(would_block());
         }
 
         let mut state = self.inner.io.lock().unwrap();
@@ -342,14 +342,14 @@ impl<'a> Write for &'a NamedPipe {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         // Make sure we're registered
         if !self.registered() {
-            return Err(would_block())
+            return Err(would_block());
         }
 
         // Make sure there's no writes pending
         let mut io = self.inner.io.lock().unwrap();
         match io.write {
             State::None => {}
-            _ => return Err(would_block())
+            _ => return Err(would_block()),
         }
 
         // Move `buf` onto the heap and fire off the write
@@ -366,11 +366,13 @@ impl<'a> Write for &'a NamedPipe {
 }
 
 impl Evented for NamedPipe {
-    fn register(&self,
-                poll: &Poll,
-                token: Token,
-                interest: Ready,
-                opts: PollOpt) -> io::Result<()> {
+    fn register(
+        &self,
+        poll: &Poll,
+        token: Token,
+        interest: Ready,
+        opts: PollOpt,
+    ) -> io::Result<()> {
         // First, register the handle with the event loop
         unsafe {
             self.poll_registration
@@ -382,11 +384,13 @@ impl Evented for NamedPipe {
         Ok(())
     }
 
-    fn reregister(&self,
-                  poll: &Poll,
-                  token: Token,
-                  interest: Ready,
-                  opts: PollOpt) -> io::Result<()> {
+    fn reregister(
+        &self,
+        poll: &Poll,
+        token: Token,
+        interest: Ready,
+        opts: PollOpt,
+    ) -> io::Result<()> {
         // Validate `Poll` and that we were previously registered
         unsafe {
             self.poll_registration
@@ -488,15 +492,15 @@ impl Inner {
 
         // Turn off our read readiness
         let ready = me.readiness.readiness();
-        me.readiness.set_readiness(ready & !Ready::readable())
-                    .expect("event loop seems gone");
+        me.readiness
+            .set_readiness(ready & !Ready::readable())
+            .expect("event loop seems gone");
 
         // Allocate a buffer and schedule the read.
         let mut buf = me.get_buffer();
         let e = unsafe {
             let overlapped = me.read.as_mut_ptr() as *mut _;
-            let slice = slice::from_raw_parts_mut(buf.as_mut_ptr(),
-                                                  buf.capacity());
+            let slice = slice::from_raw_parts_mut(buf.as_mut_ptr(), buf.capacity());
             me.handle.read_overlapped(slice, overlapped)
         };
 
@@ -511,30 +515,27 @@ impl Inner {
 
             // If ERROR_PIPE_LISTENING happens then it's not a real read error,
             // we just need to wait for a connect.
-            Err(ref e) if e.raw_os_error() == Some(ERROR_PIPE_LISTENING as i32) => {
-                false
-            }
+            Err(ref e) if e.raw_os_error() == Some(ERROR_PIPE_LISTENING as i32) => false,
 
             // If some other error happened, though, we're now readable to give
             // out the error.
             Err(e) => {
                 trace!("schedule read error: {}", e);
                 io.read = State::Err(e);
-                me.readiness.set_readiness(ready | Ready::readable())
-                            .expect("event loop still seems gone");
+                me.readiness
+                    .set_readiness(ready | Ready::readable())
+                    .expect("event loop still seems gone");
                 true
             }
         }
     }
 
-    fn schedule_write(me: &FromRawArc<Inner>,
-                      buf: Vec<u8>,
-                      pos: usize,
-                      io: &mut Io) {
+    fn schedule_write(me: &FromRawArc<Inner>, buf: Vec<u8>, pos: usize, io: &mut Io) {
         // Very similar to `schedule_read` above, just done for the write half.
         let ready = me.readiness.readiness();
-        me.readiness.set_readiness(ready & !Ready::writable())
-                    .expect("event loop seems gone");
+        me.readiness
+            .set_readiness(ready & !Ready::writable())
+            .expect("event loop seems gone");
 
         let e = unsafe {
             let overlapped = me.write.as_mut_ptr() as *mut _;
@@ -557,8 +558,9 @@ impl Inner {
     }
 
     fn add_readiness(&self, ready: Ready) {
-        self.readiness.set_readiness(ready | self.readiness.readiness())
-                      .expect("event loop still seems gone");
+        self.readiness
+            .set_readiness(ready | self.readiness.readiness())
+            .expect("event loop still seems gone");
     }
 
     fn post_register(me: &FromRawArc<Inner>) {
@@ -579,8 +581,7 @@ impl Inner {
     }
 }
 
-unsafe fn cancel<T: AsRawHandle>(handle: &T,
-                                 overlapped: &windows::Overlapped) -> io::Result<()> {
+unsafe fn cancel<T: AsRawHandle>(handle: &T, overlapped: &windows::Overlapped) -> io::Result<()> {
     let ret = CancelIoEx(handle.as_raw_handle(), overlapped.as_mut_ptr() as *mut _);
     if ret == 0 {
         Err(io::Error::last_os_error())
@@ -596,9 +597,7 @@ fn connect_done(status: &OVERLAPPED_ENTRY) {
     // Acquire the `FromRawArc<Inner>`. Note that we should be guaranteed that
     // the refcount is available to us due to the `mem::forget` in
     // `connect` above.
-    let me = unsafe {
-        overlapped2arc!(status.overlapped(), Inner, connect)
-    };
+    let me = unsafe { overlapped2arc!(status.overlapped(), Inner, connect) };
 
     // Flag ourselves as no longer using the `connect` overlapped instances.
     let prev = me.connecting.swap(false, SeqCst);
@@ -625,9 +624,7 @@ fn read_done(status: &OVERLAPPED_ENTRY) {
     // Acquire the `FromRawArc<Inner>`. Note that we should be guaranteed that
     // the refcount is available to us due to the `mem::forget` in
     // `schedule_read` above.
-    let me = unsafe {
-        overlapped2arc!(status.overlapped(), Inner, read)
-    };
+    let me = unsafe { overlapped2arc!(status.overlapped(), Inner, read) };
 
     // Move from the `Pending` to `Ok` state.
     let mut io = me.io.lock().unwrap();
@@ -659,9 +656,7 @@ fn write_done(status: &OVERLAPPED_ENTRY) {
     // Acquire the `FromRawArc<Inner>`. Note that we should be guaranteed that
     // the refcount is available to us due to the `mem::forget` in
     // `schedule_write` above.
-    let me = unsafe {
-        overlapped2arc!(status.overlapped(), Inner, write)
-    };
+    let me = unsafe { overlapped2arc!(status.overlapped(), Inner, write) };
 
     // Make the state change out of `Pending`. If we wrote the entire buffer
     // then we're writable again and otherwise we schedule another write.
@@ -705,12 +700,16 @@ impl BufferPool {
     }
 
     fn get(&mut self, default_cap: usize) -> Vec<u8> {
-        self.pool.pop().unwrap_or_else(|| Vec::with_capacity(default_cap))
+        self.pool
+            .pop()
+            .unwrap_or_else(|| Vec::with_capacity(default_cap))
     }
 
     fn put(&mut self, mut buf: Vec<u8>) {
         if self.pool.len() < self.pool.capacity() {
-            unsafe { buf.set_len(0); }
+            unsafe {
+                buf.set_len(0);
+            }
             self.pool.push(buf);
         }
     }
