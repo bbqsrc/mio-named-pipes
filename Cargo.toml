@@ -1,7 +1,7 @@
 [package]
 name = "mio-named-pipes"
 description = "Windows named pipe bindings for mio"
-version = "0.1.6"
+version = "0.1.7"
 authors = [
     "Brendan Molloy <brendan@bbqsrc.net>",
     "Alex Crichton <alex@alexcrichton.com>"
