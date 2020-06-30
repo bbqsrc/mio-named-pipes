@@ -93,7 +93,7 @@ macro_rules! overlapped2arc {
 }
 
 fn would_block() -> io::Error {
-    io::Error::new(io::ErrorKind::WouldBlock, "would block")
+    io::ErrorKind::WouldBlock.into()
 }
 
 /// Representation of a named pipe on Windows.
@@ -157,10 +157,8 @@ impl NamedPipe {
     }
 
     fn _new(addr: &OsStr) -> io::Result<NamedPipe> {
-        let pipe = try!(pipe::NamedPipe::new(addr));
-        unsafe {
-            Ok(NamedPipe::from_raw_handle(pipe.into_raw_handle()))
-        }
+        let pipe = pipe::NamedPipe::new(addr)?;
+        unsafe { Ok(NamedPipe::from_raw_handle(pipe.into_raw_handle())) }
     }
 
     /// Attempts to call `ConnectNamedPipe`, if possible.
@@ -258,9 +256,11 @@ impl NamedPipe {
     /// After a `disconnect` is issued, then a `connect` may be called again to
     /// connect to another client.
     pub fn disconnect(&self) -> io::Result<()> {
-        try!(self.inner.handle.disconnect());
-        self.inner.readiness.set_readiness(Ready::empty())
-                 .expect("event loop seems gone");
+        self.inner.handle.disconnect()?;
+        self.inner
+            .readiness
+            .set_readiness(Ready::empty())
+            .expect("event loop seems gone");
         Ok(())
     }
 
@@ -310,7 +310,7 @@ impl<'a> Read for &'a NamedPipe {
             State::Ok(data, cur) => {
                 let n = {
                     let mut remaining = &data[cur..];
-                    try!(remaining.read(buf))
+                    remaining.read(buf)?
                 };
                 let next = cur + n;
                 if next != data.len() {
@@ -370,11 +370,10 @@ impl Evented for NamedPipe {
                 opts: PollOpt) -> io::Result<()> {
         // First, register the handle with the event loop
         unsafe {
-            try!(self.poll_registration.register_handle(&self.inner.handle,
-                                                        token,
-                                                        poll));
+            self.poll_registration
+                .register_handle(&self.inner.handle, token, poll)?;
         }
-        try!(poll.register(&self.ready_registration, token, interest, opts));
+        poll.register(&self.ready_registration, token, interest, opts)?;
         self.registered.store(true, SeqCst);
         Inner::post_register(&self.inner);
         Ok(())
@@ -387,15 +386,14 @@ impl Evented for NamedPipe {
                   opts: PollOpt) -> io::Result<()> {
         // Validate `Poll` and that we were previously registered
         unsafe {
-            try!(self.poll_registration.reregister_handle(&self.inner.handle,
-                                                          token,
-                                                          poll));
+            self.poll_registration
+                .reregister_handle(&self.inner.handle, token, poll)?;
         }
 
         // At this point we should for sure have `ready_registration` unless
         // we're racing with `register` above, so just return a bland error if
         // the borrow fails.
-        try!(poll.reregister(&self.ready_registration, token, interest, opts));
+        poll.reregister(&self.ready_registration, token, interest, opts)?;
 
         Inner::post_register(&self.inner);
 
@@ -405,7 +403,8 @@ impl Evented for NamedPipe {
     fn deregister(&self, poll: &Poll) -> io::Result<()> {
         // Validate `Poll` and deregister ourselves
         unsafe {
-            try!(self.poll_registration.deregister_handle(&self.inner.handle, poll));
+            self.poll_registration
+                .deregister_handle(&self.inner.handle, poll)?;
         }
         poll.deregister(&self.ready_registration)
     }
@@ -570,8 +569,8 @@ impl Inner {
     }
 }
 
-unsafe fn cancel(handle: &AsRawHandle,
-                 overlapped: &windows::Overlapped) -> io::Result<()> {
+unsafe fn cancel<T: AsRawHandle>(handle: &T,
+                                 overlapped: &windows::Overlapped) -> io::Result<()> {
     let ret = CancelIoEx(handle.as_raw_handle(), overlapped.as_mut_ptr() as *mut _);
     if ret == 0 {
         Err(io::Error::last_os_error())
