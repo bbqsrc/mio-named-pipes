@@ -1,15 +1,26 @@
 [package]
 name = "mio-named-pipes"
+description = "Windows named pipe bindings for mio"
 version = "0.1.6"
-authors = ["Alex Crichton <alex@alexcrichton.com>"]
-license = "MIT/Apache-2.0"
+authors = [
+    "Brendan Molloy <brendan@bbqsrc.net>",
+    "Alex Crichton <alex@alexcrichton.com>"
+]
+license = "MIT OR Apache-2.0"
 readme = "README.md"
-repository = "https://github.com/alexcrichton/mio-named-pipes"
-homepage = "https://github.com/alexcrichton/mio-named-pipes"
-documentation = "https://docs.rs/mio-named-pipes/0.1/x86_64-pc-windows-msvc/mio_named_pipes/"
-description = """
-Windows named pipe bindings for mio.
-"""
+repository = "https://github.com/bbqsrc/mio-named-pipes"
+homepage = "https://github.com/bbqsrc/mio-named-pipes"
+documentation = "https://docs.rs/mio-named-pipes/"
+edition = "2018"
+
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-msvc"
+targets = [
+    "x86_64-pc-windows-msvc",
+    "i686-pc-windows-msvc",
+    "x86_64-pc-windows-gnu",
+    "i686-pc-windows-gnu",
+]
 
 [target.'cfg(windows)'.dependencies]
 log = "0.4"
